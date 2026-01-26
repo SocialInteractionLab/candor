@@ -1,0 +1,174 @@
+---
+title: "CANDOR Micro & Macro Shifts by Foote Novelty"
+format: 
+  html:
+    code-overflow: wrap
+    toc: true
+    embed-resources: true
+editor: source
+author: Helen Schmidt
+date-modified: today
+theme: flatly
+---
+
+```{r, setup, include = FALSE, message = FALSE}
+# set script working directory by checking for user (HS home or lab)
+if (Sys.info()[[7]] == "helenschmidt") {
+  knitr::opts_knit$set(root.dir = "/Users/helenschmidt/Library/CloudStorage/GoogleDrive-helenschmidt129@gmail.com/My Drive/SANLab/Experiments/Conversation-Structure")
+} else if (Sys.info()[[7]] == "tuo70125") {
+  knitr::opts_knit$set(root.dir = "/Users/tuo70125/My Drive/SANLab/Experiments/Conversation-Structure")}
+
+library(tidyverse)
+```
+
+## Overall, split by utterance
+
+```{r}
+# load umap data
+umap <- read.csv("./data/output/full-sample/umap_full_sample_tile_4_turn_split_utterances.csv")
+
+# mark topic stretches based on predicted foote novelty shifts
+umap <- umap |>
+  arrange(transcript_id, time_index) |>
+  group_by(transcript_id) |>
+  mutate(prev_shift = lag(predicted_shift, default = 0),
+         topic_boundary = ifelse(prev_shift == 1 & predicted_shift == 0, 1L, 0L),
+         topic_id = cumsum(topic_boundary) + 1L) |>
+  ungroup() |>
+  select(-prev_shift, -topic_boundary)
+
+# remove random transcript that has nothing boo
+umap <- umap |>
+  filter(transcript_id != "765f6cde-5291-4047-89c1-d71b1e3a413d")
+
+# create scaled turn ID
+umap <- umap |>
+  group_by(transcript_id) |>
+  mutate(scaled_turn = scales::rescale(time_index, to = c(0,1))) |>
+  ungroup()
+
+# create convo chunk bins
+umap <- umap |>
+  group_by(transcript_id) |>
+  mutate(convo_chunk = cut(scaled_turn, breaks = 8))
+
+```
+
+```{r}
+# plot
+umap |>
+  ggplot(aes(x = umap1, y = umap2, group = convo_chunk)) +
+  facet_wrap(~convo_chunk, ncol = 8) +
+  geom_density_2d(contour_var = "ndensity", color = "#336695") +
+  xlab("UMAP first dimension") +
+  ylab("UMAP second dimension") +
+  theme_minimal()
+
+# save plot
+ggsave(filename = "./Candor/analysis-full/output/foote_topics_overall_utterances.pdf",
+       height = 2, width = 9, dpi = 600)
+
+```
+
+## Overall, split by sentence
+
+```{r}
+# load umap data
+umap <- read.csv("./data/output/full-sample/umap_full_sample_tile_4_turn_split_sentences.csv")
+
+# mark topic stretches based on predicted foote novelty shifts
+umap <- umap |>
+  arrange(transcript_id, time_index) |>
+  group_by(transcript_id) |>
+  mutate(prev_shift = lag(predicted_shift, default = 0),
+         topic_boundary = ifelse(prev_shift == 1 & predicted_shift == 0, 1L, 0L),
+         topic_id = cumsum(topic_boundary) + 1L) |>
+  ungroup() |>
+  select(-prev_shift, -topic_boundary)
+
+# remove random transcript that has nothing boo
+umap <- umap |>
+  filter(transcript_id != "765f6cde-5291-4047-89c1-d71b1e3a413d")
+
+# create scaled turn ID
+umap <- umap |>
+  group_by(transcript_id) |>
+  mutate(scaled_turn = scales::rescale(time_index, to = c(0,1))) |>
+  ungroup()
+
+# create convo chunk bins
+umap <- umap |>
+  group_by(transcript_id) |>
+  mutate(convo_chunk = cut(scaled_turn, breaks = 8))
+
+```
+
+```{r}
+# plot
+umap |>
+  ggplot(aes(x = umap1, y = umap2, group = convo_chunk)) +
+  facet_wrap(~convo_chunk, ncol = 8) +
+  geom_density_2d(contour_var = "ndensity", color = "#336695") +
+  xlab("UMAP first dimension") +
+  ylab("UMAP second dimension") +
+  theme_minimal()
+
+# save plot
+ggsave(filename = "./Candor/analysis-full/output/foote_topics_overall_sentences.pdf",
+       height = 2, width = 9, dpi = 600)
+
+```
+
+## By speaker, split by utterance
+
+```{r}
+# load data
+umap <- read.csv("./data/output/full-sample/umap_full_sample_tile_4_turn_split_utterances_by_speaker.csv")
+
+# mark topic stretches based on predicted foote novelty shifts
+umap <- umap |>
+  arrange(transcript_id, time_index) |>
+  group_by(transcript_id) |>
+  mutate(prev_shift = lag(predicted_shift, default = 0),
+         topic_boundary = ifelse(prev_shift == 1 & predicted_shift == 0, 1L, 0L),
+         topic_id = cumsum(topic_boundary) + 1L) |>
+  ungroup() |>
+  select(-prev_shift, -topic_boundary)
+
+# remove random transcript that has nothing boo
+umap <- umap |>
+  filter(transcript_id != "765f6cde-5291-4047-89c1-d71b1e3a413d")
+
+# create scaled turn ID
+umap <- umap |>
+  group_by(transcript_id) |>
+  mutate(scaled_turn = scales::rescale(time_index, to = c(0,1))) |>
+  ungroup()
+
+# create convo chunk bins
+umap <- umap |>
+  group_by(transcript_id) |>
+  mutate(convo_chunk_overall = cut(scaled_turn, breaks = 8)) |>
+  ungroup() |>
+  group_by(transcript_id, A_speaker) |>
+  mutate(convo_chunk_speaker = cut(scaled_turn, breaks = 8)) |>
+  ungroup()
+
+```
+
+```{r}
+# plot
+umap |>
+  ggplot(aes(x = umap1, y = umap2, group = convo_chunk_overall)) +
+  facet_wrap(~convo_chunk_overall, ncol = 8) +
+  geom_density_2d(contour_var = "ndensity", color = "#336695") +
+  xlab("UMAP first dimension") +
+  ylab("UMAP second dimension") +
+  theme_minimal()
+
+ggsave(filename = "./Candor/analysis-full/output/foote_topics_speaker_utterances.pdf",
+       height = 2, width = 9, dpi = 600)
+```
+
+
+
