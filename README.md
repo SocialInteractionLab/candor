@@ -1,5 +1,8 @@
 # CANDOR
 
+## Transcript Exclusions
+`765f6cde-5291-4047-89c1-d71b1e3a413d` excluded due to lack of conversation content (N = 1655 transcripts)
+
 `experiment1` contains [empirica](https://empirica.ly/) code for annotation
 
 ## Pre-Reqs
