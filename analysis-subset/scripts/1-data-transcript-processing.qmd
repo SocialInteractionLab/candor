@@ -295,3 +295,11 @@ df |>
             sd_total_length = sd(total_length)/60)
 ```
 
+# ---------------------
+
+# Interloper Test for Inbal
+
+```{r}
+
+```
+

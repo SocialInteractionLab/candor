@@ -27,10 +27,399 @@ library(patchwork)       # combine plots
 library(tidyverse)       # all tidy things (ggplot, dplyr, etc.)
 ```
 
+# DATA
+
+Foote novelty threshold determined WITHIN a given conversation. Predicted topic shifts are based on turns that are a given standard deviation away from that threshold.
+
 ```{r}
-# load data
-full_ann <- read.csv("./data/processed/full-sample/full_sample_processed.csv")
-# tiled
-df_30 <- read.csv("./data/output/full-sample/full_sample_tile_30_sec_split_utterances_no_overlap.csv")
+# load foote novelty data
+foote <- read.csv("./data/output/full-sample/0.2_foote_20_kernel_full_sample_tile_4_turn_split_sentences.csv")
+# load full data
+df_raw <- read.csv("./data/output/full-sample/full_sample_tile_4_turn_split_sentences.csv")
+# turn angle data
+turn_angle <- read.csv("./data/output/full-sample/full_sample_tile_4_turn_split_sentences_turn_angle.csv")
+
+# merge turn angle and foote novelty with full df
+df <- df_raw |>
+  select(transcript_id, A_start_turn, euclidean_distance) |>
+  left_join(turn_angle, by = c("transcript_id", "A_start_turn")) |>
+  left_join(foote |>
+              select(transcript_id, A_start_turn, predicted_shift),
+            by = c("transcript_id", "A_start_turn")) |>
+  distinct()
+
+```
+
+# EXAMPLE
+```{r}
+# plot example transcript with predicted shifts
+example_transcript <- unique(df$transcript_id)[200]
+example <- df |> filter(transcript_id == example_transcript)
+predicted_shifts <- example |> filter(predicted_shift == 1)
+threshold <- foote |> filter(transcript_id == example_transcript) |> 
+  summarize(threshold = mean(threshold)) |>
+  pull(threshold)
+  
+
+ggplot(example, aes(x = turn_index, y = cosine_turn)) +
+  labs(title = paste0("transcript id = ", example_transcript),
+       y = "Turn Angle",
+       x = "Turn Index") +
+  geom_hline(yintercept = threshold) +
+  scale_x_continuous(expand = c(0,0)) +
+  geom_point(alpha = 0) +
+  geom_line() +
+  geom_vline(data = predicted_shifts, aes(xintercept = turn_index),
+             color = "purple", alpha = 0.2) +
+  theme_classic()
+```
+
+
+# SHIFTS
+```{r}
+# identify "blocks" when predicted_shift = 1 for multiple rows
+# rle = run length encoding
+df <- df |>
+  arrange(transcript_id, turn_index) |>
+  group_by(transcript_id) |>
+  mutate(shift_run = with(rle(predicted_shift), rep(seq_along(lengths), lengths)),
+         shift_block = ifelse(predicted_shift == 1, shift_run, NA)) |>
+  ungroup()
+
+# get average step and turn across all transcripts
+mean_values <- df |>
+  summarize(mean_step = mean(euclidean_distance, na.rm = TRUE),
+            mean_turn = mean(cosine_turn, na.rm = TRUE))
+
+# get topic transitions
+topics <- df |>
+  filter(predicted_shift == 1) |>
+  group_by(transcript_id, shift_block) |>
+  summarize(start_index = min(turn_index),
+            end_index = max(turn_index),
+            .groups = "drop")
+
+# define function to get K number of events before and after transitions
+get_windows <- function(df, topics, k) {
+  results <- list() 
+  for (i in seq_len(nrow(topics))) {
+    t <- topics[i, ]
+    data <- df |>
+      filter(transcript_id == t$transcript_id) 
+    
+    # before window
+    before <- data |>
+      filter(turn_index < t$start_index) |>
+      arrange(desc(turn_index)) |>
+      slice_head(n = k)
+    
+    if (nrow(before) == k && all(before$predicted_shift == 0)) {
+      before$relative_pos <- -seq_len(k)
+      before$event_id <- i
+      results[[length(results) + 1]] <- before }
+    
+    # after window
+    after <- data |>
+      filter(turn_index > t$end_index) |>
+      arrange(turn_index) |>
+      slice_head(n = k)
+    
+    if (nrow(after) == k && all(after$predicted_shift == 0)) {
+      after$relative_pos <- seq_len(k)
+      after$event_id <- i
+      results[[length(results) + 1]] <- after}
+    
+  } # end topic loop
+  
+  bind_rows(results)
+  
+} # end function
+
+```
+
+# PLOT
+```{r}
+# 4 turns = roughly 30 seconds of conversation
+# so window size = 1 (30 seconds before and after), window size = 2 (1 minute before and after)
+# get average euclidean distance and cosine turn before and after predicted shifts
+
+# define window size range
+window_sizes <- 1:6
+
+df_windows <- map_df(window_sizes, ~{
+  w <- get_windows(df, topics, .x)
+  w$window_size <- .x
+  w})
+
+# get summary
+df_summary <- df_windows |>
+  group_by(window_size, relative_pos) |>
+  summarize(mean_step = mean(euclidean_distance, na.rm = TRUE),
+            se_step = sd(euclidean_distance, na.rm = TRUE) / sqrt(n()),
+            mean_turn = mean(cosine_turn, na.rm = TRUE),
+            se_turn = sd(cosine_turn, na.rm = TRUE) / sqrt(n()),
+            n = n(),
+            .groups = "drop")
+
+summary_collapsed <- df_windows |>
+  mutate(period = ifelse(relative_pos < 0, "before", "after")) |>
+  group_by(window_size, period) |>
+  summarize(mean_step = mean(euclidean_distance, na.rm = TRUE),
+            se_step = sd(euclidean_distance, na.rm = TRUE) / sqrt(n()),
+            mean_turn = mean(cosine_turn, na.rm = TRUE),
+            se_turn = sd(cosine_turn, na.rm = TRUE) / sqrt(n()),
+            n = n(),
+            .groups = "drop")
+
+# add data point for at transition too
+at_transition <- df |>
+  filter(predicted_shift == 1) |>
+  summarize(mean_step = mean(euclidean_distance, na.rm = TRUE),
+            se_step = sd(euclidean_distance, na.rm = TRUE) / sqrt(n()),
+            mean_turn = mean(cosine_turn, na.rm = TRUE),
+            se_turn = sd(cosine_turn, na.rm = TRUE) / sqrt(n()),
+            n = n(),
+            .groups = "drop")
+
+at_transition <- data.frame(window_size = c(1:6),
+                            period = "at",
+                            mean_step = at_transition$mean_step,
+                            se_step = at_transition$se_step,
+                            mean_turn = at_transition$mean_turn,
+                            se_turn = at_transition$se_turn, 
+                            n = at_transition$n)
+
+summary_collapsed <- rbind(summary_collapsed, at_transition)
+summary_collapsed$period <- factor(summary_collapsed$period,
+                                   levels = c("before", "at", "after"))
+
+```
+
+```{r}
+# plot
+ggplot(summary_collapsed, aes(x = mean_step, y = mean_turn, color = period)) +
+  # plot averages across all conversations
+  geom_point(data = mean_values, aes(x = mean_step, y = mean_turn), color = "black") +
+  geom_vline(data = mean_values, aes(xintercept = mean_step), 
+             color = "black", linetype = "dotted") +
+  geom_hline(data = mean_values, aes(yintercept = mean_turn),
+             color = "black", linetype = "dotted") +
+  # plot before and after transitions
+  geom_point(size = 3) +
+  # step SE
+  geom_errorbarh(aes(xmin = mean_step - se_step,
+                     xmax = mean_step + se_step),
+                 height = 0.001) +
+  # turn SE
+  geom_errorbar(aes(ymin = mean_turn - se_turn,
+                    ymax = mean_turn + se_turn),
+                width = 0.001) +
+  # facet to show range
+  facet_wrap(.~window_size, axes = "all") +
+  scale_color_manual(values = c("#1e475c", "#b75044", "#eec773"), name = NULL) +
+  coord_fixed() +
+  theme_classic() +
+  labs(x = "Moment to Moment Step Length\n(Euclidean Distance)",
+       y = "Moment to Moment Turn Angle\n(Cosine Similarity)") +
+  theme(legend.position = "top")
+
+# just one turn example
+summary_collapsed |>
+  filter(window_size == 1) |>
+  ggplot(aes(x = mean_step, y = mean_turn, color = period)) +
+  # plot averages across all conversations
+  geom_point(data = mean_values, aes(x = mean_step, y = mean_turn), color = "black") +
+  geom_vline(data = mean_values, aes(xintercept = mean_step), 
+             color = "black", linetype = "dotted") +
+  geom_hline(data = mean_values, aes(yintercept = mean_turn),
+             color = "black", linetype = "dotted") +
+  # plot before and after transitions
+  geom_point(size = 4) +
+  # step SE
+  geom_errorbarh(aes(xmin = mean_step - se_step,
+                     xmax = mean_step + se_step),
+                 height = 0.0005) +
+  # turn SE
+  geom_errorbar(aes(ymin = mean_turn - se_turn,
+                    ymax = mean_turn + se_turn),
+                width = 0.0005) +
+  scale_color_manual(values = c("#1e475c", "#b75044", "#eec773"), name = NULL) +
+  coord_fixed() +
+  theme_classic() +
+  labs(x = "Moment to Moment Step Length\n(Euclidean Distance)",
+       y = "Moment to Moment Turn Angle\n(Cosine Similarity)") +
+  theme(legend.position = "top")
+
+```
+
+```{r}
+
+
+# merge turn angle and foote novelty with full df
+df <- df_raw |>
+  select(transcript_id, A_start_turn, euclidean_distance) |>
+  left_join(turn_angle, by = c("transcript_id", "A_start_turn")) |>
+  left_join(
+    foote |>
+      select(transcript_id, A_start_turn, predicted_shift),
+    by = c("transcript_id", "A_start_turn")
+  ) |>
+  distinct()
+
+# identify "blocks" when predicted_shift = 1 for multiple rows
+df <- df |>
+  arrange(transcript_id, turn_index) |>
+  group_by(transcript_id) |>
+  mutate(
+    shift_run = with(rle(predicted_shift), rep(seq_along(lengths), lengths)),
+    shift_block = ifelse(predicted_shift == 1, shift_run, NA)
+  )
+
+# get average step and turn across all transcripts
+mean_values <- df |>
+  ungroup() |>
+  summarize(
+    mean_step = mean(euclidean_distance, na.rm = TRUE),
+    mean_turn = mean(cosine_turn, na.rm = TRUE)
+  )
+
+# get topic transitions (events)
+topics <- df |>
+  filter(predicted_shift == 1) |>
+  group_by(transcript_id, shift_block) |>
+  summarize(
+    start_index = min(turn_index),
+    end_index   = max(turn_index),
+    .groups = "drop"
+  )
+
+df_split <- df |> group_by(transcript_id) |> group_split()
+#df_split <- df |> group_split(transcript_id)
+names(df_split) <- df |> group_keys() |> pull(transcript_id)
+
+# function to get windows
+get_windows <- function(df_split, topics, k) {
+
+  results <- list()
+
+  for (i in seq_len(nrow(topics))) {
+
+    t <- topics[i, ]
+
+    data <- df_split[[as.character(t$transcript_id)]]
+
+    # BEFORE
+    before <- data |>
+      filter(turn_index < t$start_index) |>
+      arrange(desc(turn_index)) |>
+      slice_head(n = k)
+
+    if (nrow(before) == k && all(before$predicted_shift == 0)) {
+      before$relative_pos <- -seq_len(k)
+      before$event_id <- i
+      results[[length(results) + 1]] <- before
+    }
+
+    # AFTER
+    after <- data |>
+      filter(turn_index > t$end_index) |>
+      arrange(turn_index) |>
+      slice_head(n = k)
+
+    if (nrow(after) == k && all(after$predicted_shift == 0)) {
+      after$relative_pos <- seq_len(k)
+      after$event_id <- i
+      results[[length(results) + 1]] <- after
+    }
+  }
+
+  bind_rows(results)
+}
+
+# define window sizes
+window_sizes <- 1:5
+
+# extract windows
+df_windows <- map_df(window_sizes, ~{
+  w <- get_windows(df_split, topics, .x)
+  w$window_size <- .x
+  w
+})
+
+# 🔑 EVENT-LEVEL aggregation (fixes SE issue)
+event_level <- df_windows |>
+  mutate(period = ifelse(relative_pos < 0, "before", "after")) |>
+  group_by(window_size, event_id, period) |>
+  summarize(
+    step = mean(euclidean_distance, na.rm = TRUE),
+    turn = mean(cosine_turn, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# final summary (SE across events)
+summary_collapsed <- event_level |>
+  group_by(window_size, period) |>
+  summarize(
+    mean_step = mean(step),
+    se_step   = sd(step) / sqrt(n()),
+    mean_turn = mean(turn),
+    se_turn   = sd(turn) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  )
+
+# plot
+ggplot(summary_collapsed,
+       aes(x = mean_step, y = mean_turn, color = period)) +
+
+  # overall mean reference
+  geom_point(
+    data = mean_values,
+    aes(x = mean_step, y = mean_turn),
+    color = "black"
+  ) +
+  geom_vline(
+    data = mean_values,
+    aes(xintercept = mean_step),
+    color = "black",
+    linetype = "dotted"
+  ) +
+  geom_hline(
+    data = mean_values,
+    aes(yintercept = mean_turn),
+    color = "black",
+    linetype = "dotted"
+  ) +
+
+  # before vs after points
+  geom_point(size = 3) +
+
+  # horizontal SE (euclidean)
+  geom_errorbarh(
+    aes(
+      xmin = mean_step - se_step,
+      xmax = mean_step + se_step
+    ),
+    height = 0.02
+  ) +
+
+  # vertical SE (cosine)
+  geom_errorbar(
+    aes(
+      ymin = mean_turn - se_turn,
+      ymax = mean_turn + se_turn
+    ),
+    width = 0.02
+  ) +
+
+  facet_wrap(. ~ window_size) +
+  scale_color_manual(values = c("#b75044", "#eec773"), name = NULL) +
+  coord_fixed() +
+  theme_classic() +
+  labs(
+    x = "Moment to Moment Step Length\n(Euclidean Distance)",
+    y = "Moment to Moment Turn Angle\n(Cosine Similarity)"
+  ) +
+  theme(legend.position = "top")
 ```
 
