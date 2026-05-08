@@ -24,16 +24,147 @@ if (Sys.info()[[7]] == "helenschmidt") {
 # packages
 library(Rmisc)           # summary statistics
 library(patchwork)       # combine plots
+library(purrr)
+library(stringr)
 library(tidyverse)       # all tidy things (ggplot, dplyr, etc.)
 ```
 
+```{r}
+# text cleaning function
+clean_text <- function(x) {
+  x %>%
+    str_to_lower() %>%                     # lowercase
+    str_replace_all("[[:punct:]]", " ") %>%# remove punctuation
+    str_squish()                           # trim + collapse extra spaces
+}
+```
+
+# ANNOTATIONS
+```{r}
+# load dense sample annotation data
+dense_df <- read.csv('/Users/helenschmidt/Library/CloudStorage/GoogleDrive-helenschmidt129@gmail.com/My Drive/SANLab/Experiments/Conversation-Structure/data/processed/dense_subset_processed.csv') |>
+  select(transcript_id, PID, previous_topic, new_topic, currentUtterance, turn_id) |>
+  mutate(group = "dense")
+# load larger annotation data
+ann_df <- read.csv('/Users/helenschmidt/Library/CloudStorage/GoogleDrive-helenschmidt129@gmail.com/My Drive/SANLab/Experiments/Conversation-Structure/data/processed/full-sample/full_sample_processed.csv') |>
+  select(transcript_id, PID, previous_topic, new_topic, currentUtterance, turn_id) |>
+  mutate(group = "full")
+
+# merge
+merged_df <- rbind(dense_df, ann_df)
+
+# count annotations per utterance and transcript
+merged_df <- merged_df |>
+  group_by(transcript_id, currentUtterance, group) |>
+  summarize(PID_count = n_distinct(PID), .groups = "drop") |>
+  filter(currentUtterance != "") |>
+  # apply text cleaning function
+  mutate(currentUtterance_clean = clean_text(currentUtterance)) |>
+  mutate(n_char = nchar(currentUtterance_clean),
+         n_words = lengths(str_split(currentUtterance_clean, "\\s+")))
+
+merged_split <- merged_df |>
+  group_split(transcript_id) |>
+  set_names(unique(merged_df$transcript_id))
+
+# get list of annotated transcripts
+annotated_transcripts <- unique(merged_df$transcript_id)
+
+# number of rows where just one word is present
+nrow(merged_df[merged_df$n_words == 1, ]) / nrow(merged_df)
+
+
+```
+
+
+# FOOTE BEST FIT
+
+Test best fitting foote novelty combination using annotated participant data and predicted shifts.
+
+`threshold` reflects the standard deviations away from the mean transcript foote novelty a turn has to be to count as a "predicted shift"
+
+`kernel_size` reflects the sliding window size use to calculate foote novelty
+
+```{r}
+# load all combinations for split sentence data (main)
+df_raw <- list.files(
+  "/Users/helenschmidt/Library/CloudStorage/GoogleDrive-helenschmidt129@gmail.com/My Drive/SANLab/Experiments/Conversation-Structure/data/output/full-sample/foote_novelty",
+  pattern = "_kernel_full_sample_tile_4_turn_split_sentences.csv$",
+  full.names = TRUE) 
+
+test <- df_raw[1:5]
+
+# save empty data frame
+evaluating_f1 <- data.frame()
+
+# load one file at a time
+for (i in test) {
+  
+  # load one file at a time
+  df <- read.csv(i)
+  # get threshold and kernel size from file name
+  threshold <- str_match(i, "([0-9.]+)_foote_([0-9]+)_kernel")[2]
+  kernel_size <- str_match(i, "([0-9.]+)_foote_([0-9]+)_kernel")[3]
+  
+  # ensure predicted shift is being treated correctly (1 = if foote_novelty >= threshold)
+  df$predicted_shift_new <- ifelse(df$foote_novelty >= df$threshold, 1, 0)
+  
+  # only include transcripts I have corresponding annotations for
+  # and make sure utterances are clean
+  df <- df |>
+    filter(transcript_id %in% annotated_transcripts) |>
+    mutate(utterance_clean = clean_text(utterance))
+  
+  # flag turns that were annotated by participants
+  df <- df |>
+    mutate(PID_annotated = map2_lgl(transcript_id, utterance_clean, ~ {
+      # define candidate strings
+      candidates <- merged_split[[as.character(.x)]]
+      if (is.null(candidates)) return(FALSE)
+      any(str_detect(.y, fixed(candidates$currentUtterance_clean))) }))
+  
+  # calculate F1 scores per transcript and overall for this combination
+  # true positive, false positive, false negative, precision, recall
+  this_loop_f1 <- df |>
+    group_by(transcript_id) |>
+    summarize(
+      TP = sum(predicted_shift == 1 & PID_annotated == TRUE, na.rm = TRUE),
+      FP = sum(predicted_shift == 1 & PID_annotated == FALSE, na.rm = TRUE),
+      FN = sum(predicted_shift == 0 & PID_annotated == TRUE, na.rm = TRUE),
+    
+      precision = ifelse(TP + FP == 0, NA, TP / (TP + FP)),
+      recall    = ifelse(TP + FN == 0, NA, TP / (TP + FN)),
+    
+      F1 = ifelse(is.na(precision) | is.na(recall) | (precision + recall == 0),
+                  NA, 2 * precision * recall / (precision + recall)),
+      .groups = "drop") |>
+    summarize(mean_F1 = mean(F1, na.rm = TRUE)) |>
+    pull(mean_F1)
+  
+  # save info for this loop
+  this_loop <- data.frame(threshold = threshold,
+                          kernel_size = kernel_size,
+                          F1_score = this_loop_f1)
+  
+  # add to overall loop
+  evaluating_f1 <- rbind(evaluating_f1, this_loop)
+  
+} # end loop through files
+
+# save
+#write.csv(evaluating_f1, "/Users/helenschmidt/Library/CloudStorage/GoogleDrive-helenschmidt129@gmail.com/My Drive/SANLab/Experiments/Conversation-Structure/data/output/full-sample/evaluating_all_f1_scores.csv", row.names = FALSE)
+
+```
+
 # DATA
+
+Based on above analysis, right now it looks like a threshold of 0.01 SD and a kernel size of 4 gives the highest F1 score (0.453).
 
 Foote novelty threshold determined WITHIN a given conversation. Predicted topic shifts are based on turns that are a given standard deviation away from that threshold.
 
 ```{r}
 # load foote novelty data
-foote <- read.csv("./data/output/full-sample/0.2_foote_20_kernel_full_sample_tile_4_turn_split_sentences.csv")
+foote <- read.csv("./data/output/full-sample/foote_novelty/0.01_foote_4_kernel_full_sample_tile_4_turn_split_sentences.csv")
 # load full data
 df_raw <- read.csv("./data/output/full-sample/full_sample_tile_4_turn_split_sentences.csv")
 # turn angle data
@@ -47,6 +178,13 @@ df <- df_raw |>
               select(transcript_id, A_start_turn, predicted_shift),
             by = c("transcript_id", "A_start_turn")) |>
   distinct()
+
+# get mean/median values across transcripts
+mean_values <- df |>
+  summarize(mean_step = mean(euclidean_distance, na.rm = TRUE),
+            mean_turn = mean(cosine_turn, na.rm = TRUE),
+            median_step = median(euclidean_distance, na.rm = TRUE),
+            median_turn = median(cosine_turn, na.rm = TRUE))
 
 ```
 
@@ -77,6 +215,143 @@ ggplot(example, aes(x = turn_index, y = cosine_turn)) +
 
 # SHIFTS
 ```{r}
+# build a data frame of topic events
+events <- df |>
+  filter(predicted_shift == 1) |>
+  mutate(event_id = row_number()) |>
+  select(transcript_id, turn_index, event_id)
+```
+
+```{r}
+# define function to get K events before and after predicted transitions
+get_windows <- function(df, events, k) {
+  results <- list()
+  for (i in seq_len(nrow(events))) {
+    e <- events[i, ]
+    data <- df |>
+      filter(transcript_id == e$transcript_id) |>
+      arrange(turn_index)
+    idx <- which(data$turn_index == e$turn_index)
+    if (length(idx) == 0) next
+    
+    # BEFORE window
+    before <- data |>
+      slice((idx - k):(idx - 1))
+    if (nrow(before) == k) {
+      before$relative_pos <- -k:-1
+      before$event_id <- e$event_id
+      results[[length(results) + 1]] <- before
+    }
+    
+    # AFTER window
+    after <- data |>
+      slice((idx + 1):(idx + k))
+    if (nrow(after) == k) {
+      after$relative_pos <- 1:k
+      after$event_id <- e$event_id
+      results[[length(results) + 1]] <- after
+    }
+  }
+  
+  bind_rows(results)
+  
+}
+```
+
+```{r}
+# 4 turns = roughly 30 seconds of conversation
+# so window size = 1 (30 seconds before and after), window size = 2 (1 minute before and after)
+# get average euclidean distance and cosine turn before and after predicted shifts
+
+# define window size range
+window_sizes <- 1:3
+
+df_windows <- map_df(window_sizes, \(k) {
+  w <- get_windows(df, events, k)
+  w$window_size <- k
+  w })
+
+```
+
+```{r}
+# get summary information
+summary_df <- df_windows |>
+  mutate(period = ifelse(relative_pos < 0, "before", "after")) |>
+  group_by(window_size, period) |>
+  summarize(mean_step = mean(euclidean_distance, na.rm = TRUE),
+            median_step = median(euclidean_distance, na.rm = TRUE),
+            sd_step = sd(euclidean_distance, na.rm = TRUE),
+            se_step = sd_step / sqrt(n()),
+            ci_lower_step = mean_step - 1.96 * se_step,
+            ci_upper_step = mean_step + 1.96 * se_step,
+            mean_turn = mean(cosine_turn, na.rm = TRUE),
+            median_turn = median(cosine_turn, na.rm = TRUE),
+            sd_turn = sd(cosine_turn, na.rm = TRUE),
+            se_turn = sd_turn / sqrt(n()),
+            ci_lower_turn = mean_turn - 1.96 * se_turn,
+            ci_upper_turn = mean_turn + 1.96 * se_turn,
+            n = n(),
+            .groups = "drop")
+
+# plot
+ggplot(summary_df, aes(x = mean_step, y = mean_turn, color = period)) +
+  # plot averages across all conversations
+  geom_point(data = mean_values, aes(x = mean_step, y = mean_turn), color = "black") +
+  geom_vline(data = mean_values, aes(xintercept = mean_step), 
+             color = "black", linetype = "dotted") +
+  geom_hline(data = mean_values, aes(yintercept = mean_turn),
+             color = "black", linetype = "dotted") +
+  # plot before and after transitions
+  geom_point(size = 2, alpha = 0.5) +
+  # step SE
+  geom_errorbarh(aes(xmin = ci_lower_step,
+                     xmax = ci_upper_step),
+                 height = 0.001) +
+  # turn SE
+  geom_errorbar(aes(ymin = ci_lower_turn,
+                    ymax = ci_upper_turn),
+                width = 0.001) +
+  # facet to show range
+  facet_wrap(.~window_size, axes = "all") +
+  scale_color_manual(values = c("#b75044", "#eec773"), name = NULL) +
+  coord_fixed() +
+  theme_classic() +
+  labs(x = "Moment to Moment Step Length\n(Euclidean Distance)",
+       y = "Moment to Moment Turn Angle\n(Cosine Similarity)") +
+  theme(legend.position = "top")
+
+# immediate window before and after
+summary_df |>
+  filter(window_size == 1) |>
+  ggplot(aes(x = mean_step, y = mean_turn, color = period)) +
+  # plot averages across all conversations
+  geom_point(data = mean_values, aes(x = mean_step, y = mean_turn), color = "black") +
+  geom_vline(data = mean_values, aes(xintercept = mean_step), 
+             color = "black", linetype = "dotted") +
+  geom_hline(data = mean_values, aes(yintercept = mean_turn),
+             color = "black", linetype = "dotted") +
+  # plot before and after transitions
+  geom_point(size = 3, alpha = 0.5) +
+  # step SE
+  geom_errorbarh(aes(xmin = ci_lower_step,
+                     xmax = ci_upper_step),
+                 height = 0.001) +
+  # turn SE
+  geom_errorbar(aes(ymin = ci_lower_turn,
+                    ymax = ci_upper_turn),
+                width = 0.001) +
+  scale_color_manual(values = c("#b75044", "#1e475c"), name = NULL) +
+  coord_fixed() +
+  theme_classic() +
+  labs(x = "Moment to Moment Step Length\n(Euclidean Distance)",
+       y = "Moment to Moment Turn Angle\n(Cosine Similarity)") +
+  theme(legend.position = "top")
+
+```
+
+
+
+```{r}
 # identify "blocks" when predicted_shift = 1 for multiple rows
 # rle = run length encoding
 df <- df |>
@@ -89,7 +364,9 @@ df <- df |>
 # get average step and turn across all transcripts
 mean_values <- df |>
   summarize(mean_step = mean(euclidean_distance, na.rm = TRUE),
-            mean_turn = mean(cosine_turn, na.rm = TRUE))
+            mean_turn = mean(cosine_turn, na.rm = TRUE),
+            median_step = median(euclidean_distance, na.rm = TRUE),
+            median_turn = median(cosine_turn, na.rm = TRUE))
 
 # get topic transitions
 topics <- df |>
@@ -144,7 +421,7 @@ get_windows <- function(df, topics, k) {
 # get average euclidean distance and cosine turn before and after predicted shifts
 
 # define window size range
-window_sizes <- 1:6
+window_sizes <- 1:3
 
 df_windows <- map_df(window_sizes, ~{
   w <- get_windows(df, topics, .x)

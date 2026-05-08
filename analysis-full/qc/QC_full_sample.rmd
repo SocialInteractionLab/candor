@@ -1,0 +1,219 @@
+---
+title: "QC_full_sample.Rmd"
+output: html_document
+date: "2025"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(janitor)
+
+d <- read_csv("/Users/helenschmidt/Library/CloudStorage/GoogleDrive-helenschmidt129@gmail.com/My Drive/SANLab/Experiments/Conversation-Structure/data/processed/full-sample/full_sample_processed.csv", show_col_types = FALSE) |>
+  clean_names() |>
+  select(transcript_id, turn_id, previous_topic, new_topic, pid) |>
+  mutate(turn_id = as.numeric(turn_id))
+
+```
+
+```{r}
+head(d)
+glimpse(d)
+d |> select(transcript_id, turn_id) |> head(20)
+```
+
+```{r}
+# Annotation counts per transcript
+annotation_counts <- d |>
+  count(transcript_id, name = "n_annotations")
+head(annotation_counts)
+summary(annotation_counts$n_annotations)
+```
+
+```{r}
+# Distribution: annotations per transcript 
+ggplot(annotation_counts, aes(x = n_annotations)) +
+  geom_histogram(bins = 50, fill = "lightblue", color = "white") +
+  labs(
+    title = "Distribution of annotation counts per transcript",
+    x = "Number of Annotations",
+    y = "Number of Transcripts"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+# Front vs Back coverage (this is by turn_id midpoint)
+tx_span <- d |>
+  group_by(transcript_id) |>
+  summarize(
+    min_turn = min(turn_id, na.rm = TRUE),
+    max_turn = max(turn_id, na.rm = TRUE),
+    midpoint = (min_turn + max_turn) / 2,
+    .groups = "drop"
+  )
+d_with_mid <- d |>
+  left_join(tx_span, by = "transcript_id") |>
+  mutate(half = if_else(turn_id <= midpoint, "front", "back"))
+
+front_back_counts <- d_with_mid |>
+  count(transcript_id, half) |>
+  pivot_wider(names_from = half, values_from = n, values_fill = 0)
+
+# ratio
+front_back_summary <- front_back_counts |>
+  mutate(back_front_ratio = if_else(front > 0, back / front, NA_real_))
+
+head(front_back_summary)
+```
+
+```{r}
+# Distribution: back/front ratio
+ggplot(front_back_summary, aes(x = back_front_ratio)) +
+  geom_histogram(bins = 50, fill = "lightpink", color = "white") +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
+  labs(
+    title = "Front vs Back Coverage by Transcript",
+    x = "Back/Front Ratio",
+    y = "Number of Transcripts"
+  ) +
+  theme_minimal()
+
+# smaller numbers = fewer ratings in back half compared to front half of transcript
+
+```
+
+```{r}
+#Topic quality 
+topic_qc <- d |>
+  group_by(transcript_id) |>
+  summarize(
+    n_annotations    = n(),
+    n_unique_topics  = n_distinct(new_topic),
+    n_same_topic     = sum(new_topic == previous_topic, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+head(topic_qc)
+summary(topic_qc$n_unique_topics)
+summary(topic_qc$n_same_topic)
+
+# 3a18db1d-a49e-48ee-b598-545465442c74
+# high n_annotations but low n_unique_topics
+```
+
+```{r}
+# Distributions: topics
+# unique topics per transcript
+ggplot(topic_qc, aes(x = n_unique_topics)) +
+  geom_histogram(bins = 50, fill = "mediumpurple", color = "white") +
+  labs(title = "Unique Topics per Transcript",
+       x = "Count of distinct new_topic", y = "Number of Transcripts") +
+  theme_minimal()
+
+# diagnostic: previous_topic == new_topic counts
+ggplot(topic_qc, aes(x = n_same_topic)) +
+  geom_histogram(bins = 55, fill = "tomato", color = "white") +
+  labs(title = "rows with previous_topic == new_topic",
+       x = "No change rows per transcript", y = "number of Transcripts") +
+  theme_minimal()
+
+```
+
+```{r}
+#Final QC, flags
+
+# thresholds
+    
+fail_threshold  <- 2    
+at_risk_limit   <- 10
+qc <- d %>%
+  group_by(transcript_id) %>%
+  mutate(
+    min_turn = min(turn_id, na.rm = TRUE),
+    max_turn = max(turn_id, na.rm = TRUE),
+    midpoint = (min_turn + max_turn) / 2,
+    half     = if_else(turn_id <= midpoint, "front", "back")
+  ) %>%
+  summarize(
+    n_annotations   = n(),
+    front = sum(half == "front", na.rm = TRUE),
+    back = sum(half == "back",  na.rm = TRUE),
+
+    back_front_ratio= if_else(front > 0, back / front, NA_real_),
+    n_unique_topics = n_distinct(new_topic),
+    n_same_topic    = sum(new_topic == previous_topic, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+  flag_low_ann      = n_annotations <= at_risk_limit,  
+  flag_very_low     = n_annotations <= fail_threshold,  
+  flag_topic_repeat = n_same_topic > 0,
+
+    qc_fail = n_annotations <= fail_threshold,                     
+  at_risk = (n_annotations <= at_risk_limit) | (n_same_topic > 0) 
+)
+
+names(qc)
+qc
+
+readr::write_csv(qc, "qc_summary_by_transcript.csv")
+
+to_recollect <- qc %>%
+  filter(qc_fail | at_risk) %>%
+  arrange(desc(qc_fail), desc(at_risk), n_annotations)
+
+# HELEN DEFINED TO RECOLLECT
+# 44 transcripts only have 1 annotation provided
+#205 transcripts have less than 10 annotations provided (includes 44 with only 1 annotation)
+#1 transcript has 30+ repeating annotations (3a18db1d-a49e-48ee-b598-545465442c74)
+#107 transcripts have a repeating topic
+
+helen_recollect <- qc |>
+  filter(n_annotations < 10 | flag_topic_repeat == TRUE | transcript_id == "3a18db1d-a49e-48ee-b598-545465442c74")
+
+write.csv(helen_recollect, "/Users/helenschmidt/Library/CloudStorage/GoogleDrive-helenschmidt129@gmail.com/My Drive/SANLab/Experiments/Conversation-Structure/data/processed/full-sample/qc_failed_transcripts.csv")
+
+
+cat("Transcripts total:", nrow(qc), "\n")
+cat("QC fail (n_annotations <= 2):", sum(qc$qc_fail), "\n")
+cat("At risk (n_annotations <= 10 OR topic repeat):", sum(qc$at_risk), "\n")
+
+```
+
+```{r write_csvs, message=FALSE, warning=FALSE}
+readr::write_csv(annotation_counts, "annotation_counts_by_transcript.csv")
+readr::write_csv(front_back_summary, "front_back_summary.csv")
+readr::write_csv(topic_qc, "topic_quality_summary.csv")
+readr::write_csv(qc, "qc_summary_by_transcript.csv")
+readr::write_csv(to_recollect, "transcripts_flagged_for_recollection.csv")
+
+```
+
+```{r qc_failed_ids, message=FALSE, warning=FALSE}
+library(dplyr)
+library(readr)
+library(jsonlite)
+
+# IDs of transcripts that failed QC
+failed_ids <- qc %>%
+  filter(qc_fail) %>%
+  transmute(transcript_id = as.character(transcript_id)) %>%
+  distinct() %>%
+  arrange(transcript_id)
+
+cat("QC-failed transcripts:", nrow(failed_ids), "\n")
+head(failed_ids)
+
+# Exports
+readr::write_csv(failed_ids, "qc_failed_transcripts.csv")
+jsonlite::write_json(
+  list(transcript_ids = failed_ids$transcript_id),
+  "qc_failed_transcripts.json",
+  pretty = TRUE, auto_unbox = TRUE
+)
+writeLines(failed_ids$transcript_id, "qc_failed_transcripts.txt")
+```
+
